@@ -6,6 +6,14 @@ A human reviewer still owns the merge decision. The bot exists to catch real def
 
 ## What it does
 
+On **push to a feature branch** (before a PR exists), the bot:
+
+1. Diffs the branch against the default branch.
+2. Posts a **commit comment** if there are findings (GitHub cannot attach a PR review without a PR).
+3. Publishes a **DX Code Review Bot** check on the commit. Request changes makes the check red.
+
+If an open PR already exists for that branch, the pre-PR job is skipped so you do not get two reviews.
+
 On each non-draft pull request (opened, updated, reopened, or marked ready), **DX Code Review Bot**:
 
 1. Reads the PR diff through the GitHub API (it does not check out or run fork code).
@@ -55,6 +63,8 @@ Keep one copy of the logic. From the plugin/theme repo, add `.github/workflows/d
 name: DX Code Review Bot
 
 on:
+  push:
+    branches-ignore: [master, main]
   pull_request_target:
     types: [opened, reopened, synchronize, ready_for_review, converted_to_draft]
   issue_comment:
@@ -62,7 +72,8 @@ on:
 
 permissions:
   actions: write
-  contents: read
+  checks: write
+  contents: write
   pull-requests: write
 
 jobs:
@@ -87,6 +98,7 @@ Until that secret exists, the review body still opens with `# DX Code Review Bot
 
 ## Behaviour details
 
+- **Pre-PR branches:** a push with no open PR gets a commit comment (only if there is a problem) and a check on the commit. Open the commit from the branch page to read it.
 - **Draft PRs** are skipped until they are marked ready for review. Converting to draft cancels any in-flight review run. `@dx-review` still works on drafts.
 - **Request changes** converts the PR to draft and fails the check. Mark **Ready for review** after the fix; that triggers a new review.
 - **Dependabot / Renovate** PRs are skipped.
@@ -97,13 +109,13 @@ Until that secret exists, the review body still opens with `# DX Code Review Bot
 
 ## Security notes
 
-This workflow uses `pull_request_target` so it can post reviews on fork PRs and read repository secrets. That is safe only because:
+The pull-request job uses `pull_request_target` so it can post reviews on fork PRs and read repository secrets. That is safe only because:
 
 - The workflow file is taken from the **base** branch, not from the PR.
 - The review action fetches the diff over the API.
 - There is **no** `actions/checkout` of the PR head, and no execution of PR scripts.
 
-Do not add a checkout of `github.event.pull_request.head.sha` to this job.
+The **pre-PR branch job** runs on `push` in the same repository (collaborators only, not forks). It checks out that branch to compute `git diff` against the default branch. Do not add a checkout of `github.event.pull_request.head.sha` to the pull-request job.
 
 ## Local test
 

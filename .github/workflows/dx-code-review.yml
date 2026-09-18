@@ -5,7 +5,7 @@
 # and can write the review. The action reads the PR diff via the GitHub API
 # and does not check out or execute untrusted fork code.
 # On Request changes the PR is converted to draft and the check fails.
-# Feature-branch pushes without an open PR get a commit comment and a check.
+# A push to a new feature branch opens a draft PR and reviews it there.
 name: DX Code Review Bot
 
 on:
@@ -37,7 +37,7 @@ concurrency:
 permissions:
   actions: write
   checks: write
-  contents: write
+  contents: read
   pull-requests: write
 
 jobs:
@@ -71,7 +71,7 @@ jobs:
           done
 
   dx-branch-review:
-    name: DX Code Review Bot (branch)
+    name: DX Code Review Bot (draft PR)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     if: >
@@ -94,7 +94,7 @@ jobs:
           path: .dx-bot
           persist-credentials: false
 
-      - name: Review branch before PR
+      - name: Open draft PR and review
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_PR_REVIEW }}
           GH_TOKEN: ${{ secrets.DX_REVIEW_GITHUB_TOKEN || github.token }}

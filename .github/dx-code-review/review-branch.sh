@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# Pre-PR branch review for DX Code Review Bot.
+# Open a draft PR for a new feature branch and post the review there.
+# GitHub cannot attach PR comments without a PR; a draft PR is the native place.
 # Required env: DEEPSEEK_API_KEY, GH_TOKEN, REPO, SHA, BRANCH, DEFAULT_BRANCH, PROMPT_FILE
 set -euo pipefail
 
 MAX_LENGTH="${MAX_LENGTH:-100000}"
 MARKER='<!-- dx-code-review-bot -->'
+AUTO_PR_MARKER='<!-- dx-auto-draft-pr -->'
 
 post_check() {
   local conclusion="$1"
@@ -25,9 +27,44 @@ post_check() {
 }
 
 skip_check() {
-  echo "Skipping pre-PR review: $1"
+  echo "Skipping branch review: $1"
   post_check "neutral" "Skipped" "$1"
   exit 0
+}
+
+post_or_update_comment() {
+  local pr_number="$1"
+  local body="$2"
+  local comment_id
+  comment_id="$(
+    gh api "repos/${REPO}/issues/${pr_number}/comments" --paginate \
+      --jq ".[] | select(.body | contains(\"${MARKER}\")) | .id" \
+      | tail -n1 || true
+  )"
+  if [ -n "$comment_id" ]; then
+    jq -n --arg body "$body" '{body: $body}' \
+      | gh api -X PATCH "repos/${REPO}/issues/comments/${comment_id}" --input - >/dev/null
+  else
+    jq -n --arg body "$body" '{body: $body}' \
+      | gh api -X POST "repos/${REPO}/issues/${pr_number}/comments" --input - >/dev/null
+  fi
+}
+
+parse_verdict() {
+  local text="$1"
+  if printf '%s' "$text" | grep -qiE 'DX_VERDICT:[[:space:]]*REQUEST_CHANGES'; then
+    echo "REQUEST_CHANGES"
+  elif printf '%s' "$text" | grep -qiE 'DX_VERDICT:[[:space:]]*LOOKS_GOOD'; then
+    echo "LOOKS_GOOD"
+  elif printf '%s' "$text" | grep -qiE 'DX_VERDICT:[[:space:]]*COMMENT'; then
+    echo "COMMENT"
+  elif printf '%s' "$text" | grep -qiE 'Request changes|Do not merge|### \[BLOCKER\]'; then
+    echo "REQUEST_CHANGES"
+  elif printf '%s' "$text" | grep -qiE 'Looks good'; then
+    echo "LOOKS_GOOD"
+  else
+    echo "COMMENT"
+  fi
 }
 
 subject="$(git log -1 --format=%s "${SHA}")"
@@ -37,7 +74,7 @@ fi
 
 open_pr="$(gh pr list --repo "${REPO}" --head "${BRANCH}" --state open --json number --jq '.[0].number // empty')"
 if [ -n "$open_pr" ]; then
-  skip_check "Open PR #${open_pr} already exists for ${BRANCH}; the pull-request review will handle comments."
+  skip_check "Open PR #${open_pr} already exists for ${BRANCH}; later pushes to a draft are left quiet until Ready for review or @dx-review."
 fi
 
 git fetch --no-tags origin "${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}"
@@ -78,12 +115,48 @@ if [ -z "$diff" ]; then
 fi
 
 if [ "${#diff}" -gt "$MAX_LENGTH" ]; then
-  skip_check "Diff is ${#diff} characters (limit ${MAX_LENGTH}). Split the branch or open a smaller PR."
+  skip_check "Diff is ${#diff} characters (limit ${MAX_LENGTH}). Split the branch."
 fi
 
+title="$subject"
+if [ -z "$title" ] || [ ${#title} -gt 90 ]; then
+  title="WIP: ${BRANCH}"
+fi
+title="${title//$'\r'/}"
+
+pr_body="$(cat <<EOF
+${AUTO_PR_MARKER}
+${MARKER}
+
+## DX Code Review Bot
+
+Opened automatically as a **draft** when \`${BRANCH}\` was pushed, so review comments can live on the pull request (not on a commit).
+
+- Later WIP pushes to this draft are **not** re-reviewed.
+- Comment \`@dx-review\` for another pass, or mark **Ready for review** when a human should look.
+EOF
+)"
+
+if ! pr_url="$(
+  gh pr create \
+    --repo "${REPO}" \
+    --base "${DEFAULT_BRANCH}" \
+    --head "${BRANCH}" \
+    --draft \
+    --title "${title}" \
+    --body "${pr_body}"
+)"; then
+  echo "Could not open a draft PR. In the repository: Settings → Actions → General → Workflow permissions → enable \"Allow GitHub Actions to create and approve pull requests\". Or set DX_REVIEW_GITHUB_TOKEN to a PAT/GitHub App token that can open pull requests."
+  exit 1
+fi
+
+pr_number="$(printf '%s' "$pr_url" | grep -oE '[0-9]+$')"
+echo "Opened draft PR #${pr_number}: ${pr_url}"
+
 user_prompt="$(cat <<EOF
-Review this feature-branch diff as DX Code Review Bot. There is no Pull Request yet.
-Follow the required output format exactly. Comment only on issues you can justify from the changed lines.
+Review this GitHub Pull Request diff as DX Code Review Bot.
+The PR is a draft opened automatically from a feature branch. Follow the required output format exactly.
+Comment only on issues you can justify from the changed lines.
 If there are no justified findings, use a Looks good verdict. End with the DX_VERDICT line.
 
 ${diff}
@@ -116,52 +189,48 @@ if ! printf '%s' "$api_response" | jq -e '.choices[0].message.content' >/dev/nul
 fi
 
 body="$(printf '%s' "$api_response" | jq -r '.choices[0].message.content')"
-
-verdict="COMMENT"
-if printf '%s' "$body" | grep -qiE 'DX_VERDICT:[[:space:]]*REQUEST_CHANGES'; then
-  verdict="REQUEST_CHANGES"
-elif printf '%s' "$body" | grep -qiE 'DX_VERDICT:[[:space:]]*LOOKS_GOOD'; then
-  verdict="LOOKS_GOOD"
-elif printf '%s' "$body" | grep -qiE 'DX_VERDICT:[[:space:]]*COMMENT'; then
-  verdict="COMMENT"
-elif printf '%s' "$body" | grep -qiE 'Request changes|Do not merge|### \[BLOCKER\]'; then
-  verdict="REQUEST_CHANGES"
-elif printf '%s' "$body" | grep -qiE 'Looks good'; then
-  verdict="LOOKS_GOOD"
-fi
-
+verdict="$(parse_verdict "$body")"
 summary="$(printf '%s' "$body" | head -c 65000)"
+
 if [ "$verdict" = "REQUEST_CHANGES" ]; then
   conclusion="failure"
-  title="Request changes"
+  check_title="Request changes"
 elif [ "$verdict" = "LOOKS_GOOD" ]; then
   conclusion="success"
-  title="Looks good"
+  check_title="Looks good"
 else
   conclusion="neutral"
-  title="Comment"
+  check_title="Comment"
 fi
 
-post_check "$conclusion" "$title" "$summary"
+post_check "$conclusion" "$check_title" "$summary"
 
-if [ "$verdict" != "LOOKS_GOOD" ]; then
-  comment="${MARKER}
-## DX Code Review Bot (pre-PR)
+jq -n --arg body "$body" --arg sha "$SHA" '{commit_id: $sha, body: $body, event: "COMMENT"}' \
+  | gh api -X POST "repos/${REPO}/pulls/${pr_number}/reviews" --input - >/dev/null
 
-**Branch:** \`${BRANCH}\`
+comment="${MARKER}
+## DX Code Review Bot
+
 **Verdict:** \`${verdict}\`
 
-${body}
+This pull request was opened as a **draft** so findings appear in Conversation.
 
----
-Open a pull request after the findings are addressed. This comment is on the commit because there is no PR yet.
 "
-  jq -n --arg body "$comment" '{body: $body}' \
-    | gh api -X POST "repos/${REPO}/commits/${SHA}/comments" --input - >/dev/null
-  echo "Posted a commit comment on ${SHA}."
+
+if [ "$verdict" = "REQUEST_CHANGES" ]; then
+  comment="${comment}Blocker/High issues were found. Keep it draft until they are fixed, then comment \`@dx-review\` or mark **Ready for review**.
+"
+elif [ "$verdict" = "LOOKS_GOOD" ]; then
+  comment="${comment}No Blocker/High issues from this diff. Mark **Ready for review** when a human should take it.
+"
+else
+  comment="${comment}Medium findings only. A human reviewer should still confirm before merge.
+"
 fi
 
-echo "Pre-PR verdict: ${verdict}"
+post_or_update_comment "$pr_number" "$comment"
+
+echo "Draft PR #${pr_number} verdict: ${verdict}"
 if [ "$verdict" = "REQUEST_CHANGES" ]; then
   exit 1
 fi

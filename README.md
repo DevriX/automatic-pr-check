@@ -6,13 +6,11 @@ A human reviewer still owns the merge decision. The bot exists to catch real def
 
 ## What it does
 
-On **push to a feature branch** (before a PR exists), the bot:
+On **push to a new feature branch**, the bot opens a **draft pull request** and reviews that. Comments go in Conversation, like a normal PR. GitHub has no review thread without a PR; a draft is the native place for them.
 
-1. Diffs the branch against the default branch.
-2. Posts a **commit comment** if there are findings (GitHub cannot attach a PR review without a PR).
-3. Publishes a **DX Code Review Bot** check on the commit. Request changes makes the check red.
-
-If an open PR already exists for that branch, the pre-PR job is skipped so you do not get two reviews.
+- Later WIP commits on that draft are left quiet (no comment spam).
+- `@dx-review` or **Ready for review** starts another pass.
+- If a PR already exists for the branch, this push job does nothing.
 
 On each non-draft pull request (opened, updated, reopened, or marked ready), **DX Code Review Bot**:
 
@@ -45,6 +43,8 @@ Re-run on demand by commenting **`@dx-review`** on the PR (owners, members, and 
 
 Add them under **Settings → Secrets and variables → Actions**.
 
+Also enable **Settings → Actions → General → Workflow permissions → Allow GitHub Actions to create and approve pull requests**. Without that, the bot cannot open the automatic draft PR (`GITHUB_TOKEN` is not allowed to create PRs). A PAT/GitHub App in `DX_REVIEW_GITHUB_TOKEN` is the alternative.
+
 Prefer an organization secret so every DevriX repo inherits the same key.
 
 ### 2. This template repository
@@ -73,7 +73,7 @@ on:
 permissions:
   actions: write
   checks: write
-  contents: write
+  contents: read
   pull-requests: write
 
 jobs:
@@ -98,8 +98,8 @@ Until that secret exists, the review body still opens with `# DX Code Review Bot
 
 ## Behaviour details
 
-- **Pre-PR branches:** a push with no open PR gets a commit comment (only if there is a problem) and a check on the commit. Open the commit from the branch page to read it.
-- **Draft PRs** are skipped until they are marked ready for review. Converting to draft cancels any in-flight review run. `@dx-review` still works on drafts.
+- **New branches:** the first push opens a draft PR and posts the review in Conversation. Further pushes to that draft are not re-reviewed until Ready for review or `@dx-review`.
+- **Draft PRs** opened by a human are skipped until they are marked ready for review. Converting to draft cancels any in-flight review run.
 - **Request changes** converts the PR to draft and fails the check. Mark **Ready for review** after the fix; that triggers a new review.
 - **Dependabot / Renovate** PRs are skipped.
 - A newer push cancels an in-flight review on the same PR (`concurrency`).
@@ -115,13 +115,14 @@ The pull-request job uses `pull_request_target` so it can post reviews on fork P
 - The review action fetches the diff over the API.
 - There is **no** `actions/checkout` of the PR head, and no execution of PR scripts.
 
-The **pre-PR branch job** runs on `push` in the same repository (collaborators only, not forks). It checks out that branch to compute `git diff` against the default branch. Do not add a checkout of `github.event.pull_request.head.sha` to the pull-request job.
+The **branch job** runs on `push` (collaborators only, not forks). It checks out that branch, opens a **draft PR**, and posts the review on it. Do not add a checkout of `github.event.pull_request.head.sha` to the pull-request job.
 
 ## Local test
 
-Open a PR against `master` in this repo with an obvious WordPress security mistake. Confirm that:
+Push a new branch (no PR yet) with an obvious WordPress security mistake. Confirm that:
 
-1. The **DX Code Review Bot** workflow starts.
-2. A review appears on the PR with Blocker/High findings and a **Request changes** verdict.
+1. A **draft PR** is opened automatically
+2. A Conversation comment and review appear on that draft
+3. Request changes keeps it draft and turns the check red
 
 Put `skip cr` in the title if you need a PR that must not be reviewed. Never put that keyword in the PR body by accident (the bot treats it as a skip).

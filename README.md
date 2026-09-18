@@ -21,7 +21,7 @@ jobs:
         uses: hustcer/deepseek-review@v1
         with:
           chat-token: ${{ secrets.DEEPSEEK_API_PR_REVIEW }}
-          model: "deepseek-chat"
+          model: "deepseek-flash"
           sys-prompt: >
             You are a Senior WordPress Architect, React Specialist, and Security Auditor specializing in WordPress.com (VIP / Repo) standards.
             Review the provided Git diff thoroughly and provide structured, actionable feedback in English covering the following priority areas:

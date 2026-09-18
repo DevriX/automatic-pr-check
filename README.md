@@ -55,36 +55,9 @@ The workflow in this repo is the source of truth:
 
 It already runs here. After you merge changes to `master`, new PRs use the updated prompt and branding.
 
-### 3. Other DevriX repositories (recommended)
+### 3. Other DevriX repositories
 
-Keep one copy of the logic. From the plugin/theme repo, add `.github/workflows/dx-code-review.yml`:
-
-```yaml
-name: DX Code Review Bot
-
-on:
-  push:
-    branches-ignore: [master, main]
-  pull_request_target:
-    types: [opened, reopened, synchronize, ready_for_review, converted_to_draft]
-  issue_comment:
-    types: [created]
-
-permissions:
-  actions: write
-  checks: write
-  contents: read
-  pull-requests: write
-
-jobs:
-  dx-code-review:
-    uses: DevriX/automatic-pr-check/.github/workflows/dx-code-review.yml@master
-    secrets:
-      DEEPSEEK_API_PR_REVIEW: ${{ secrets.DEEPSEEK_API_PR_REVIEW }}
-      DX_REVIEW_GITHUB_TOKEN: ${{ secrets.DX_REVIEW_GITHUB_TOKEN }}
-```
-
-Pin `@master` only while the bot is still moving quickly. For production plugins, pin a commit SHA of this repository instead.
+Copy [`.github/workflows/dx-code-review.yml`](.github/workflows/dx-code-review.yml) into the plugin/theme repo and set `DEEPSEEK_API_PR_REVIEW`. The workflow pulls the prompt/scripts from `DevriX/automatic-pr-check@master`, so merge this bot there first.
 
 ### 4. Optional: comments as DX Code Review Bot
 

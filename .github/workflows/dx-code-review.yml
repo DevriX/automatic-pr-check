@@ -23,12 +23,6 @@ on:
   issue_comment:
     types:
       - created
-  workflow_call:
-    secrets:
-      DEEPSEEK_API_PR_REVIEW:
-        required: true
-      DX_REVIEW_GITHUB_TOKEN:
-        required: false
 
 concurrency:
   group: dx-code-review-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number || github.ref_name }}

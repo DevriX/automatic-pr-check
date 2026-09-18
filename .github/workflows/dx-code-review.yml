@@ -247,23 +247,16 @@ jobs:
                 | tail -n1 || true
             )"
             if [ -n "$comment_id" ]; then
-              gh api -X PATCH "repos/${REPO}/issues/comments/${comment_id}" -f body="$body" >/dev/null
+              jq -n --arg body "$body" '{body: $body}' \
+                | gh api -X PATCH "repos/${REPO}/issues/comments/${comment_id}" --input - >/dev/null
             else
-              gh api -X POST "repos/${REPO}/issues/${PR_NUMBER}/comments" -f body="$body" >/dev/null
+              jq -n --arg body "$body" '{body: $body}' \
+                | gh api -X POST "repos/${REPO}/issues/${PR_NUMBER}/comments" --input - >/dev/null
             fi
           }
 
           if [ "$review_count" = "0" ]; then
-            post_or_update_comment "${marker}
-## DX Code Review Bot
-
-No review was posted. Common causes:
-
-- The PR title or description contains \`skip cr\` or the skip-review keyword
-- The diff was empty after ignoring generated files
-
-Remove those keywords from the title/description and push a commit, or comment \`@dx-review\`.
-"
+            post_or_update_comment "${marker}"$'\n'"## DX Code Review Bot"$'\n\n'"No review was posted. Remove skip keywords from the title/description and push a commit, or comment @dx-review."
             echo "No review payload to enforce."
             exit 0
           fi
@@ -284,16 +277,10 @@ Remove those keywords from the title/description and push a commit, or comment \
             verdict="LOOKS_GOOD"
           fi
 
-          comment="${marker}
-## DX Code Review Bot
-
-**Verdict:** \`${verdict}\`
-"
+          comment="${marker}"$'\n'"## DX Code Review Bot"$'\n\n'"**Verdict:** \`${verdict}\`"$'\n'
 
           if [ -n "$review_url" ]; then
-            comment="${comment}
-Full findings: ${review_url}
-"
+            comment="${comment}"$'\n'"Full findings: ${review_url}"$'\n'
           fi
 
           if [ "$verdict" = "REQUEST_CHANGES" ]; then
@@ -303,24 +290,16 @@ Full findings: ${review_url}
               gh api graphql -f query='mutation($id: ID!) { convertPullRequestToDraft(input: { pullRequestId: $id }) { pullRequest { isDraft } } }' -f id="$node_id" >/dev/null
               echo "Converted PR #${PR_NUMBER} to draft."
             fi
-            comment="${comment}
-This pull request was moved back to **draft** because the review found Blocker/High issues. The check is red until those are fixed.
-
-Mark it **Ready for review** after addressing the findings.
-"
+            comment="${comment}"$'\n'"This pull request was moved back to **draft** because the review found Blocker/High issues. Mark **Ready for review** after addressing the findings."$'\n'
             post_or_update_comment "$comment"
             echo "Negative verdict: failing the job so the PR check is red."
             exit 1
           fi
 
           if [ "$verdict" = "LOOKS_GOOD" ]; then
-            comment="${comment}
-No Blocker/High issues from this diff.
-"
+            comment="${comment}"$'\n'"No Blocker/High issues from this diff."$'\n'
           else
-            comment="${comment}
-Medium findings only. A human reviewer should still confirm before merge.
-"
+            comment="${comment}"$'\n'"Medium findings only. A human reviewer should still confirm before merge."$'\n'
           fi
 
           post_or_update_comment "$comment"

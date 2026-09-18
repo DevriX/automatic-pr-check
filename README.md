@@ -1,60 +1,113 @@
-name: DeepSeek Code Review
+# DX Code Review Bot
+
+Automated pull request review for DevriX WordPress plugins, themes, and Gutenberg work. It posts a structured review in English, focused on security, WordPress.com VIP safety, REST/AJAX authorization, and production performance.
+
+A human reviewer still owns the merge decision. The bot exists to catch real defects early, not to replace review.
+
+## What it does
+
+On each non-draft pull request (opened, updated, reopened, or marked ready), **DX Code Review Bot**:
+
+1. Reads the PR diff through the GitHub API (it does not check out or run fork code).
+2. Sends that diff to DeepSeek with a DevriX / WordPress VIP system prompt.
+3. Posts one review on the PR, branded as DX Code Review Bot, with a verdict and severity-ranked findings.
+
+Skip a run by putting `skip review` or `skip cr` in the PR title or body.
+
+Re-run on demand by commenting **`@dx-review`** on the PR (owners, members, and collaborators only).
+
+## Verdicts
+
+| Verdict | When |
+| --- | --- |
+| **Request changes** | Any Blocker or High finding (XSS, SQL injection, missing nonce/caps, VIP-unsafe filesystem, and similar) |
+| **Comment** | Medium findings only |
+| **Looks good** | Clean diff, or only nits |
+
+The GitHub check still **passes** after a review is posted. A red finding is a review comment, not a failed CI job. That is intentional: the bot must not silently block merge the way a test suite does.
+
+## Repository setup
+
+### 1. Secrets
+
+| Secret | Required | Purpose |
+| --- | --- | --- |
+| `DEEPSEEK_API_PR_REVIEW` | Yes | DeepSeek API key |
+| `DX_REVIEW_GITHUB_TOKEN` | No | Token of a GitHub App or bot user named **DX Code Review Bot**. If unset, comments appear as `github-actions[bot]` with the DX header in the body. |
+
+Add them under **Settings → Secrets and variables → Actions**.
+
+Prefer an organization secret so every DevriX repo inherits the same key.
+
+### 2. This template repository
+
+The workflow in this repo is the source of truth:
+
+[`.github/workflows/dx-code-review.yml`](.github/workflows/dx-code-review.yml)
+
+It already runs here. After you merge changes to `master`, new PRs use the updated prompt and branding.
+
+### 3. Other DevriX repositories (recommended)
+
+Keep one copy of the logic. From the plugin/theme repo, add `.github/workflows/dx-code-review.yml`:
+
+```yaml
+name: DX Code Review Bot
 
 on:
   pull_request_target:
-    types:
-      - opened
-      - reopened
-      - synchronize
+    types: [opened, reopened, synchronize, ready_for_review]
+  issue_comment:
+    types: [created]
 
 permissions:
+  contents: read
   pull-requests: write
 
 jobs:
-  deepseek-code-review:
-    name: AI Code Review
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+  dx-code-review:
+    uses: DevriX/automatic-pr-check/.github/workflows/dx-code-review.yml@master
+    secrets:
+      DEEPSEEK_API_PR_REVIEW: ${{ secrets.DEEPSEEK_API_PR_REVIEW }}
+      DX_REVIEW_GITHUB_TOKEN: ${{ secrets.DX_REVIEW_GITHUB_TOKEN }}
+```
 
-    steps:
-      - name: Run DeepSeek Code Review
-        uses: hustcer/deepseek-review@v1
-        with:
-          chat-token: ${{ secrets.DEEPSEEK_API_PR_REVIEW }}
-          model: "deepseek-flash"
-          sys-prompt: >
-            You are a Senior WordPress Architect, React Specialist, and Security Auditor specializing in WordPress.com (VIP / Repo) standards.
-            Review the provided Git diff thoroughly and provide structured, actionable feedback in English covering the following priority areas:
+Pin `@master` only while the bot is still moving quickly. For production plugins, pin a commit SHA of this repository instead.
 
-            1. **WordPress Security & Strict Escaping/Sanitization (CRITICAL):**
-               - Verify that EVERY output is properly escaped using the correct WordPress function (`esc_html()`, `esc_attr()`, `esc_url()`, `esc_js()`, `wp_kses()`, etc.).
-               - Check that ALL user inputs and superglobals (`$_POST`, `$_GET`, `$_REQUEST`, etc.) are sanitized (`sanitize_text_field()`, `absint()`, `wp_unslash()`, etc.).
-               - Ensure strict Nonce validation (`wp_verify_nonce()`, `check_admin_referer()`) and capability checks (`current_user_can()`) on all AJAX / REST / form handlers.
-               - Prevent SQL Injection (ensure proper preparation via `$wpdb->prepare()`) and XSS vulnerabilities.
+### 4. Optional: comments as DX Code Review Bot
 
-            2. **WordPress.com / VIP Plugin Compatibility & Best Practices:**
-               - Ensure code strictly adheres to WordPress.com / VIP Coding Standards (avoid raw SQL queries, unsafe file options, un-cached queries, or direct DB writes where core functions exist).
-               - Check for smooth integration and non-conflicting interactions with official WordPress.com and popular WordPress repository plugins.
-               - Verify proper hook/filter usage, avoiding deprecated functions or direct execution on page load.
+`GITHUB_TOKEN` always publishes as `github-actions[bot]`. To show the **DX Code Review Bot** name and avatar on the review:
 
-            3. **React & Custom Gutenberg Blocks:**
-               - Review React components for secure data handling, state management, and memory leaks.
-               - Ensure Gutenberg attributes are properly defined, sanitized, and safely saved/rendered.
-               - Check REST API endpoints for proper permission callbacks and response sanitization.
+1. Create a GitHub App (or machine user) named `DX Code Review Bot`.
+2. Grant it **Pull requests: Read and write** and **Contents: Read** on the target repos.
+3. Store the app installation token (or a fine-grained PAT) as `DX_REVIEW_GITHUB_TOKEN`.
 
-            4. **Code Quality & Performance:**
-               - Highlight performance bottlenecks (e.g., unbounded database queries, missing transients/caching).
-               - Provide concise code snippets showing exact recommended fixes.
+Until that secret exists, the review body still opens with `# DX Code Review Bot`.
 
-          exclude-patterns: >
-            node_modules/**,
-            vendor/**,
-            build/**,
-            dist/**,
-            *.min.js,
-            *.min.css,
-            package-lock.json,
-            pnpm-lock.yaml,
-            composer.lock,
-            *.map,
-            *.svg
+## Behaviour details
+
+- **Draft PRs** are skipped until they are marked ready for review. `@dx-review` still works on drafts.
+- **Dependabot / Renovate** PRs are skipped.
+- A newer push cancels an in-flight review on the same PR (`concurrency`).
+- Diffs larger than 100k Unicode width are skipped to cap API cost. Split the PR or comment `@dx-review` after shrinking it.
+- Generated noise is ignored (`node_modules`, `vendor`, lockfiles, minified assets, maps, fonts, images).
+- Model: `deepseek-flash`. Temperature: `0.2` for more consistent findings.
+
+## Security notes
+
+This workflow uses `pull_request_target` so it can post reviews on fork PRs and read repository secrets. That is safe only because:
+
+- The workflow file is taken from the **base** branch, not from the PR.
+- The review action fetches the diff over the API.
+- There is **no** `actions/checkout` of the PR head, and no execution of PR scripts.
+
+Do not add a checkout of `github.event.pull_request.head.sha` to this job.
+
+## Local test
+
+Open a PR against `master` in this repo with an obvious WordPress security mistake. Confirm that:
+
+1. The **DX Code Review Bot** workflow starts.
+2. A review appears on the PR with Blocker/High findings and a **Request changes** verdict.
+
+Put `skip review` in the title if you need a PR that must not be reviewed.

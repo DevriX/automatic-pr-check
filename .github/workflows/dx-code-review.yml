@@ -13,6 +13,7 @@ on:
       - reopened
       - synchronize
       - ready_for_review
+      - converted_to_draft
   issue_comment:
     types:
       - created
@@ -28,10 +29,40 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
+  actions: write
   contents: read
   pull-requests: write
 
 jobs:
+  cancel-on-draft:
+    name: Cancel review on draft
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.event_name == 'pull_request_target' && github.event.action == 'converted_to_draft'
+    steps:
+      - name: Cancel in-progress DX Code Review runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+          CURRENT_RUN: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          for status in in_progress queued pending; do
+            mapfile -t ids < <(
+              gh run list --repo "$REPO" --branch "$BRANCH" --status "$status" --limit 50 \
+                --json databaseId,workflowName \
+                --jq '.[] | select(.workflowName == "DX Code Review Bot" or .workflowName == "DeepSeek Code Review") | .databaseId' \
+                || true
+            )
+            for id in "${ids[@]}"; do
+              [ -z "$id" ] && continue
+              [ "$id" = "$CURRENT_RUN" ] && continue
+              gh run cancel "$id" --repo "$REPO" || true
+              echo "Cancelled run $id"
+            done
+          done
+
   dx-code-review:
     name: DX Code Review Bot
     runs-on: ubuntu-latest
@@ -40,6 +71,7 @@ jobs:
       (github.event_name == 'issue_comment' && github.event.issue.pull_request) ||
       (
         github.event_name != 'issue_comment' &&
+        github.event.action != 'converted_to_draft' &&
         github.event.pull_request.draft == false &&
         github.actor != 'dependabot[bot]' &&
         github.actor != 'renovate[bot]'
@@ -88,7 +120,7 @@ jobs:
             Review this GitHub Pull Request diff as DX Code Review Bot.
             Follow the required output format exactly. Comment only on issues you can
             justify from the changed lines. If there are no justified findings, use a
-            Looks good verdict and say so plainly.
+            Looks good verdict and say so plainly. End with the DX_VERDICT line.
           sys-prompt: |
             You are DX Code Review Bot, the automated code reviewer for DevriX.
 
@@ -142,6 +174,11 @@ jobs:
             ## Residual risk
             What you could not verify from the diff (e.g. a callee in another file). If nothing, write "None from this diff."
 
+            End the review with exactly one of these lines, with no extra text after it:
+            DX_VERDICT: REQUEST_CHANGES
+            DX_VERDICT: COMMENT
+            DX_VERDICT: LOOKS_GOOD
+
             VERDICT DISCIPLINE
             - If the diff is clean, say so. Do not manufacture issues to look thorough.
             - If the author labeled the change as an intentional insecure fixture, still report the issues; note that it appears intentional, and keep the verdict Request changes.
@@ -151,3 +188,103 @@ jobs:
             - AJAX/REST/form handlers need both a nonce (or equivalent auth) and a capability check. `wp_ajax_nopriv_` on a write endpoint is usually a Blocker.
             - Direct writes under `ABSPATH` or `WP_CONTENT_DIR` are Blocker on VIP.
             - `admin_init` must not echo HTML; notices belong on `admin_notices`.
+
+      - name: Post conversation comment and convert to draft if needed
+        env:
+          GH_TOKEN: ${{ secrets.DX_REVIEW_GITHUB_TOKEN || github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+        run: |
+          set -euo pipefail
+
+          reviews_json="$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews")"
+          review_count="$(printf '%s' "$reviews_json" | jq 'length')"
+          marker='<!-- dx-code-review-bot -->'
+
+          post_or_update_comment() {
+            local body="$1"
+            local comment_id
+            comment_id="$(
+              gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --paginate \
+                --jq ".[] | select(.body | contains(\"${marker}\")) | .id" \
+                | tail -n1 || true
+            )"
+            if [ -n "$comment_id" ]; then
+              gh api -X PATCH "repos/${REPO}/issues/comments/${comment_id}" -f body="$body" >/dev/null
+            else
+              gh api -X POST "repos/${REPO}/issues/${PR_NUMBER}/comments" -f body="$body" >/dev/null
+            fi
+          }
+
+          if [ "$review_count" = "0" ]; then
+            post_or_update_comment "${marker}
+## DX Code Review Bot
+
+No review was posted. Common causes:
+
+- The PR title or description contains \`skip cr\` or the skip-review keyword
+- The diff was empty after ignoring generated files
+
+Remove those keywords from the title/description and push a commit, or comment \`@dx-review\`.
+"
+            echo "No review payload to enforce."
+            exit 0
+          fi
+
+          body="$(printf '%s' "$reviews_json" | jq -r '.[-1].body // ""')"
+          review_url="$(printf '%s' "$reviews_json" | jq -r '.[-1].html_url // ""')"
+          verdict="COMMENT"
+
+          if printf '%s' "$body" | grep -qiE 'DX_VERDICT:[[:space:]]*REQUEST_CHANGES'; then
+            verdict="REQUEST_CHANGES"
+          elif printf '%s' "$body" | grep -qiE 'DX_VERDICT:[[:space:]]*LOOKS_GOOD'; then
+            verdict="LOOKS_GOOD"
+          elif printf '%s' "$body" | grep -qiE 'DX_VERDICT:[[:space:]]*COMMENT'; then
+            verdict="COMMENT"
+          elif printf '%s' "$body" | grep -qiE 'Request changes|Do not merge|🔴 CRITICAL|### \[BLOCKER\]'; then
+            verdict="REQUEST_CHANGES"
+          elif printf '%s' "$body" | grep -qiE 'Looks good'; then
+            verdict="LOOKS_GOOD"
+          fi
+
+          comment="${marker}
+## DX Code Review Bot
+
+**Verdict:** \`${verdict}\`
+"
+
+          if [ -n "$review_url" ]; then
+            comment="${comment}
+Full findings: ${review_url}
+"
+          fi
+
+          if [ "$verdict" = "REQUEST_CHANGES" ]; then
+            is_draft="$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.draft')"
+            if [ "$is_draft" != "true" ]; then
+              node_id="$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.node_id')"
+              gh api graphql -f query='mutation($id: ID!) { convertPullRequestToDraft(input: { pullRequestId: $id }) { pullRequest { isDraft } } }' -f id="$node_id" >/dev/null
+              echo "Converted PR #${PR_NUMBER} to draft."
+            fi
+            comment="${comment}
+This pull request was moved back to **draft** because the review found Blocker/High issues. The check is red until those are fixed.
+
+Mark it **Ready for review** after addressing the findings.
+"
+            post_or_update_comment "$comment"
+            echo "Negative verdict: failing the job so the PR check is red."
+            exit 1
+          fi
+
+          if [ "$verdict" = "LOOKS_GOOD" ]; then
+            comment="${comment}
+No Blocker/High issues from this diff.
+"
+          else
+            comment="${comment}
+Medium findings only. A human reviewer should still confirm before merge.
+"
+          fi
+
+          post_or_update_comment "$comment"
+          echo "Verdict ${verdict}: leaving the PR open."

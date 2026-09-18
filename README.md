@@ -10,9 +10,11 @@ On each non-draft pull request (opened, updated, reopened, or marked ready), **D
 
 1. Reads the PR diff through the GitHub API (it does not check out or run fork code).
 2. Sends that diff to DeepSeek with a DevriX / WordPress VIP system prompt.
-3. Posts one review on the PR, branded as DX Code Review Bot, with a verdict and severity-ranked findings.
+3. Posts a GitHub review **and** a Conversation comment, branded as DX Code Review Bot.
+4. On **Request changes** (Blocker/High): converts the PR back to **draft** and fails the check (red).
+5. If someone converts the PR to draft while a review is running, that run is **cancelled**.
 
-Skip a run by putting `skip review` or `skip cr` in the PR title or body.
+Skip a run by putting `skip cr` in the PR **title**. Do not put that phrase in the description unless you really mean to skip.
 
 Re-run on demand by commenting **`@dx-review`** on the PR (owners, members, and collaborators only).
 
@@ -20,11 +22,9 @@ Re-run on demand by commenting **`@dx-review`** on the PR (owners, members, and 
 
 | Verdict | When |
 | --- | --- |
-| **Request changes** | Any Blocker or High finding (XSS, SQL injection, missing nonce/caps, VIP-unsafe filesystem, and similar) |
-| **Comment** | Medium findings only |
-| **Looks good** | Clean diff, or only nits |
-
-The GitHub check still **passes** after a review is posted. A red finding is a review comment, not a failed CI job. That is intentional: the bot must not silently block merge the way a test suite does.
+| **Request changes** | Any Blocker or High finding (XSS, SQL injection, missing nonce/caps, VIP-unsafe filesystem, and similar). PR is converted to draft and the check goes red. |
+| **Comment** | Medium findings only. Check stays green. |
+| **Looks good** | Clean diff, or only nits. Check stays green. |
 
 ## Repository setup
 
@@ -56,11 +56,12 @@ name: DX Code Review Bot
 
 on:
   pull_request_target:
-    types: [opened, reopened, synchronize, ready_for_review]
+    types: [opened, reopened, synchronize, ready_for_review, converted_to_draft]
   issue_comment:
     types: [created]
 
 permissions:
+  actions: write
   contents: read
   pull-requests: write
 
@@ -86,7 +87,8 @@ Until that secret exists, the review body still opens with `# DX Code Review Bot
 
 ## Behaviour details
 
-- **Draft PRs** are skipped until they are marked ready for review. `@dx-review` still works on drafts.
+- **Draft PRs** are skipped until they are marked ready for review. Converting to draft cancels any in-flight review run. `@dx-review` still works on drafts.
+- **Request changes** converts the PR to draft and fails the check. Mark **Ready for review** after the fix; that triggers a new review.
 - **Dependabot / Renovate** PRs are skipped.
 - A newer push cancels an in-flight review on the same PR (`concurrency`).
 - Diffs larger than 100k Unicode width are skipped to cap API cost. Split the PR or comment `@dx-review` after shrinking it.
@@ -110,4 +112,4 @@ Open a PR against `master` in this repo with an obvious WordPress security mista
 1. The **DX Code Review Bot** workflow starts.
 2. A review appears on the PR with Blocker/High findings and a **Request changes** verdict.
 
-Put `skip review` in the title if you need a PR that must not be reviewed.
+Put `skip cr` in the title if you need a PR that must not be reviewed. Never put that keyword in the PR body by accident (the bot treats it as a skip).
